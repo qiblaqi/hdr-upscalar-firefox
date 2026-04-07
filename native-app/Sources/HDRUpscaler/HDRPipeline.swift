@@ -15,9 +15,13 @@ final class HDRPipeline {
     private var upscaledTexture: MTLTexture?
     private var hdrOutputTexture: MTLTexture?
     private var presentTexture: MTLTexture?   // native-res texture for final presentation
+    private var croppedTexture: MTLTexture?   // cropped region texture
     private var paramsBuffer: MTLBuffer?
     private var frameCount: UInt64 = 0
     private(set) var isActive = false
+
+    /// Video region as fractional rect (0.0–1.0) — nil means full window
+    private var videoRegion: CGRect?
 
     // Backpressure: skip new frames if previous hasn't presented
     private var frameInFlight = false
@@ -93,6 +97,7 @@ final class HDRPipeline {
         upscaledTexture = nil
         hdrOutputTexture = nil
         presentTexture = nil
+        croppedTexture = nil
         print("[HDRPipeline] Upscale factor → \(factor)x")
     }
 
@@ -100,6 +105,20 @@ final class HDRPipeline {
         hdrIntensity = max(0.0, min(1.0, intensity))
         updateParamsBuffer()
         print("[HDRPipeline] HDR intensity → \(String(format: "%.0f%%", hdrIntensity * 100))")
+    }
+
+    /// Set the video region as a fractional rect (0.0–1.0) relative to the window.
+    func setVideoRegion(_ rect: CGRect) {
+        videoRegion = rect
+        croppedTexture = nil
+        print("[HDRPipeline] Video region set: \(String(format: "%.1f%%", rect.origin.x * 100)),\(String(format: "%.1f%%", rect.origin.y * 100)) \(String(format: "%.1f%%", rect.width * 100))x\(String(format: "%.1f%%", rect.height * 100))")
+    }
+
+    /// Clear the video region — process full window.
+    func clearVideoRegion() {
+        videoRegion = nil
+        croppedTexture = nil
+        print("[HDRPipeline] Video region cleared — full window")
     }
 
     // MARK: - Frame Processing (called from processing queue)
@@ -115,10 +134,45 @@ final class HDRPipeline {
         // Update EDR headroom each frame (it can change with brightness/ambient)
         updateParamsBuffer()
 
+        // Step 0: Crop to video region if set (blit encoder — GPU-side crop)
+        let sourceTexture: MTLTexture
+        let srcW: Int
+        let srcH: Int
+
+        if let region = videoRegion {
+            let cropX = Int(region.origin.x * CGFloat(width))
+            let cropY = Int(region.origin.y * CGFloat(height))
+            let cropW = min(Int(region.width * CGFloat(width)), width - cropX)
+            let cropH = min(Int(region.height * CGFloat(height)), height - cropY)
+
+            guard cropW > 0 && cropH > 0 else { return }
+
+            ensureCroppedTexture(width: cropW, height: cropH, pixelFormat: inputTexture.pixelFormat)
+            guard let cropTex = croppedTexture else { return }
+
+            guard let blitEncoder = commandBuffer.makeBlitCommandEncoder() else { return }
+            blitEncoder.copy(
+                from: inputTexture, sourceSlice: 0, sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: cropX, y: cropY, z: 0),
+                sourceSize: MTLSize(width: cropW, height: cropH, depth: 1),
+                to: cropTex, destinationSlice: 0, destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+            )
+            blitEncoder.endEncoding()
+
+            sourceTexture = cropTex
+            srcW = cropW
+            srcH = cropH
+        } else {
+            sourceTexture = inputTexture
+            srcW = width
+            srcH = height
+        }
+
         // Safety clamp
         let maxSize = 16384
-        let outputWidth = Int(Float(width) * upscaleFactor)
-        let outputHeight = Int(Float(height) * upscaleFactor)
+        let outputWidth = Int(Float(srcW) * upscaleFactor)
+        let outputHeight = Int(Float(srcH) * upscaleFactor)
 
         if outputWidth > maxSize || outputHeight > maxSize {
             return
@@ -134,11 +188,11 @@ final class HDRPipeline {
         if needsUpscale {
             do {
                 try upscaler.configure(
-                    inputWidth: width,
-                    inputHeight: height,
+                    inputWidth: srcW,
+                    inputHeight: srcH,
                     outputWidth: outputWidth,
                     outputHeight: outputHeight,
-                    inputPixelFormat: inputTexture.pixelFormat
+                    inputPixelFormat: sourceTexture.pixelFormat
                 )
             } catch {
                 print("[HDRPipeline] Upscaler error: \(error)")
@@ -154,7 +208,7 @@ final class HDRPipeline {
             guard let upscaledTex = upscaledTexture else { return }
 
             do {
-                try upscaler.encode(input: inputTexture, output: upscaledTex, commandBuffer: commandBuffer)
+                try upscaler.encode(input: sourceTexture, output: upscaledTex, commandBuffer: commandBuffer)
             } catch {
                 print("[HDRPipeline] Upscaler encode error: \(error)")
                 return
@@ -163,9 +217,9 @@ final class HDRPipeline {
             processW = outputWidth
             processH = outputHeight
         } else {
-            textureAfterUpscale = inputTexture
-            processW = width
-            processH = height
+            textureAfterUpscale = sourceTexture
+            processW = srcW
+            processH = srcH
         }
 
         // Step 2: SDR-to-EDR compute shader (at upscaled resolution for quality)
@@ -190,7 +244,7 @@ final class HDRPipeline {
         // Step 3: If upscaled, MPS downscale back to native resolution (supersampling)
         let textureToPresent: MTLTexture
         if needsUpscale {
-            ensurePresentTexture(width: width, height: height)
+            ensurePresentTexture(width: srcW, height: srcH)
             guard let presentTex = presentTexture else { return }
 
             let scale = MPSImageBilinearScale(device: device)
@@ -214,7 +268,8 @@ final class HDRPipeline {
         frameCount += 1
         if frameCount % 120 == 0 {
             let maxEDR = Float(NSScreen.main?.maximumExtendedDynamicRangeColorComponentValue ?? 2.0)
-            print("[HDRPipeline] \(frameCount) frames | \(width)x\(height) → \(processW)x\(processH) (\(upscaleFactor)x) | EDR: \(String(format: "%.1f", maxEDR))x | intensity: \(String(format: "%.0f%%", hdrIntensity * 100))")
+            let cropInfo = videoRegion != nil ? " (cropped \(srcW)x\(srcH))" : ""
+            print("[HDRPipeline] \(frameCount) frames | \(width)x\(height)\(cropInfo) → \(processW)x\(processH) (\(upscaleFactor)x) | EDR: \(String(format: "%.1f", maxEDR))x | intensity: \(String(format: "%.0f%%", hdrIntensity * 100))")
         }
     }
 
@@ -225,6 +280,22 @@ final class HDRPipeline {
         let maxEDR = Float(NSScreen.main?.maximumExtendedDynamicRangeColorComponentValue ?? 2.0)
         let params = HDRParams(maxEDR: maxEDR, intensity: hdrIntensity)
         buffer.contents().storeBytes(of: params, as: HDRParams.self)
+    }
+
+    private func ensureCroppedTexture(width: Int, height: Int, pixelFormat: MTLPixelFormat) {
+        if croppedTexture == nil ||
+           croppedTexture!.width != width ||
+           croppedTexture!.height != height {
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: pixelFormat,
+                width: width,
+                height: height,
+                mipmapped: false
+            )
+            desc.usage = [.shaderRead, .shaderWrite, .renderTarget]
+            desc.storageMode = .private
+            croppedTexture = device.makeTexture(descriptor: desc)
+        }
     }
 
     private func ensureHDROutputTexture(width: Int, height: Int) {

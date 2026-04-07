@@ -194,24 +194,6 @@ final class ScreenCapture: NSObject, SCStreamDelegate, SCStreamOutput {
         print("[ScreenCapture] Stopped")
     }
 
-    /// Update the capture region (e.g. for a specific video area within the window)
-    func updateCaptureRect(_ rect: CGRect) async throws {
-        guard let stream = stream, capturedWindow != nil else { return }
-
-        let config = SCStreamConfiguration()
-        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
-        config.width = Int(rect.width * scale)
-        config.height = Int(rect.height * scale)
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 30)
-        config.queueDepth = 3
-        config.pixelFormat = kCVPixelFormatType_32BGRA
-        config.showsCursor = false
-        config.capturesAudio = false
-        config.sourceRect = rect
-
-        try await stream.updateConfiguration(config)
-    }
-
     // MARK: - SCStreamOutput
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
