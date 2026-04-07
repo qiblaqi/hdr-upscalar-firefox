@@ -1,24 +1,33 @@
 import AppKit
 
-/// Full-screen overlay that lets the user click-drag to select a rectangular region.
-/// Used to select the video player area within the Firefox window.
+/// Overlay that lets the user click-drag to select a rectangular region within the Firefox window.
+/// The panel is positioned exactly over the window, so drag coordinates directly give
+/// window-relative positions — no multi-display coordinate conversion needed.
 final class RegionSelector {
     private var panel: NSPanel?
     private var selectionView: SelectionView?
 
-    /// Called with the selected region in screen coordinates (Quartz top-left origin).
-    /// Returns nil if the user cancels (press Escape or click without dragging).
-    var onRegionSelected: ((NSRect) -> Void)?
+    /// Called with the selected region as a fractional rect (0.0–1.0) relative to the window.
+    /// This avoids Quartz/Cocoa coordinate conversion issues on multi-display setups.
+    var onRegionSelected: ((CGRect) -> Void)?
 
-    /// Show the selection overlay on the screen containing the given window frame.
-    func show(windowFrame: NSRect) {
-        // Find the screen that contains the window
-        let screen = NSScreen.screens.first { screen in
-            screen.frame.intersects(windowFrame)
-        } ?? NSScreen.main ?? NSScreen.screens.first!
+    /// Show the selection overlay positioned exactly over the given window frame.
+    /// `windowFrame` is in Quartz coordinates (top-left origin, from CGWindowListCopyWindowInfo).
+    func show(windowFrame: CGRect) {
+        // Convert Quartz (top-left) to Cocoa (bottom-left) for NSPanel positioning
+        guard let primaryScreen = NSScreen.screens.first else { return }
+        let primaryHeight = primaryScreen.frame.height
+        let cocoaY = primaryHeight - windowFrame.origin.y - windowFrame.height
+
+        let panelFrame = NSRect(
+            x: windowFrame.origin.x,
+            y: cocoaY,
+            width: windowFrame.width,
+            height: windowFrame.height
+        )
 
         let panel = NSPanel(
-            contentRect: screen.frame,
+            contentRect: panelFrame,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -26,16 +35,16 @@ final class RegionSelector {
 
         panel.isOpaque = false
         panel.backgroundColor = NSColor.black.withAlphaComponent(0.3)
-        panel.level = .screenSaver  // above everything
+        panel.level = .screenSaver
         panel.hasShadow = false
         panel.ignoresMouseEvents = false
         panel.collectionBehavior = [.canJoinAllSpaces]
 
-        let view = SelectionView(frame: screen.frame)
-        view.windowFrame = windowFrame
-        view.screenFrame = screen.frame
-        view.onComplete = { [weak self] rect in
-            self?.handleSelection(rect)
+        let view = SelectionView(frame: NSRect(x: 0, y: 0, width: windowFrame.width, height: windowFrame.height))
+        view.windowWidth = windowFrame.width
+        view.windowHeight = windowFrame.height
+        view.onComplete = { [weak self] fractionalRect in
+            self?.handleSelection(fractionalRect)
         }
         view.onCancel = { [weak self] in
             self?.dismiss()
@@ -43,14 +52,12 @@ final class RegionSelector {
 
         panel.contentView = view
         panel.makeKeyAndOrderFront(nil)
-
-        // Make our app temporarily active so we can receive mouse events
         NSApp.activate(ignoringOtherApps: true)
 
         self.panel = panel
         self.selectionView = view
 
-        print("[RegionSelector] Select the video area by clicking and dragging. Press Escape to cancel.")
+        print("[RegionSelector] Drag over the video area. Press Escape to cancel.")
     }
 
     func dismiss() {
@@ -59,26 +66,25 @@ final class RegionSelector {
         selectionView = nil
     }
 
-    private func handleSelection(_ rect: NSRect) {
-        guard rect.width > 50 && rect.height > 50 else {
+    private func handleSelection(_ fractionalRect: CGRect) {
+        guard fractionalRect.width > 0.03 && fractionalRect.height > 0.03 else {
             print("[RegionSelector] Selection too small, cancelled")
             dismiss()
             return
         }
 
-        print("[RegionSelector] Selected region: \(Int(rect.origin.x)),\(Int(rect.origin.y)) \(Int(rect.width))x\(Int(rect.height))")
+        print("[RegionSelector] Selected: \(String(format: "%.1f%%", fractionalRect.origin.x * 100)),\(String(format: "%.1f%%", fractionalRect.origin.y * 100)) \(String(format: "%.1f%%", fractionalRect.width * 100))x\(String(format: "%.1f%%", fractionalRect.height * 100))")
         dismiss()
-        onRegionSelected?(rect)
+        onRegionSelected?(fractionalRect)
     }
 }
 
 // MARK: - Selection View
 
-/// Custom view that handles click-drag to draw a selection rectangle.
 private class SelectionView: NSView {
-    var windowFrame: NSRect = .zero
-    var screenFrame: NSRect = .zero
-    var onComplete: ((NSRect) -> Void)?
+    var windowWidth: CGFloat = 0
+    var windowHeight: CGFloat = 0
+    var onComplete: ((CGRect) -> Void)?
     var onCancel: (() -> Void)?
 
     private var dragStart: NSPoint?
@@ -90,7 +96,6 @@ private class SelectionView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self)
-        // Set crosshair cursor
         NSCursor.crosshair.set()
     }
 
@@ -99,9 +104,7 @@ private class SelectionView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 { // Escape
-            onCancel?()
-        }
+        if event.keyCode == 53 { onCancel?() }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -122,51 +125,45 @@ private class SelectionView: NSView {
         isDragging = false
         let end = convert(event.locationInWindow, from: nil)
 
-        // Build rect from drag points (Cocoa coordinates, bottom-left origin)
+        // View coordinates: (0,0) is bottom-left of the panel (which covers the window exactly)
         let x = min(start.x, end.x)
         let y = min(start.y, end.y)
         let w = abs(end.x - start.x)
         let h = abs(end.y - start.y)
-        let cocoaRect = NSRect(x: x, y: y, width: w, height: h)
 
-        // Convert to screen coordinates
-        guard let windowObj = window else { return }
-        let screenRect = windowObj.convertToScreen(cocoaRect)
+        // Convert to fractional coordinates (0.0–1.0) relative to window
+        // Flip Y: view has bottom-left origin, but we want top-left to match texture coordinates
+        let fracX = x / windowWidth
+        let fracY = 1.0 - (y + h) / windowHeight
+        let fracW = w / windowWidth
+        let fracH = h / windowHeight
 
-        // Convert Cocoa (bottom-left origin) to Quartz (top-left origin)
-        guard let primaryScreen = NSScreen.screens.first else { return }
-        let primaryHeight = primaryScreen.frame.height
-        let quartzRect = NSRect(
-            x: screenRect.origin.x,
-            y: primaryHeight - screenRect.origin.y - screenRect.height,
-            width: screenRect.width,
-            height: screenRect.height
+        let fractionalRect = CGRect(
+            x: max(0, min(1, fracX)),
+            y: max(0, min(1, fracY)),
+            width: max(0, min(1 - max(0, fracX), fracW)),
+            height: max(0, min(1 - max(0, fracY), fracH))
         )
 
-        onComplete?(quartzRect)
+        onComplete?(fractionalRect)
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        // Draw semi-transparent overlay
         NSColor.black.withAlphaComponent(0.3).setFill()
         dirtyRect.fill()
 
-        // Draw selection rectangle
         guard isDragging, let start = dragStart, let end = dragEnd else {
-            // Draw instruction text
-            let text = "Click and drag to select the video area\nPress Escape to cancel"
+            let text = "Drag to select the video area\nPress Escape to cancel"
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 24, weight: .medium),
+                .font: NSFont.systemFont(ofSize: 20, weight: .medium),
                 .foregroundColor: NSColor.white,
             ]
             let size = text.size(withAttributes: attrs)
-            let textRect = NSRect(
+            text.draw(in: NSRect(
                 x: (bounds.width - size.width) / 2,
                 y: (bounds.height - size.height) / 2,
-                width: size.width,
-                height: size.height
-            )
-            text.draw(in: textRect, withAttributes: attrs)
+                width: size.width, height: size.height
+            ), withAttributes: attrs)
             return
         }
 
@@ -176,17 +173,14 @@ private class SelectionView: NSView {
         let h = abs(end.y - start.y)
         let selRect = NSRect(x: x, y: y, width: w, height: h)
 
-        // Clear the selected area (make it transparent to show what's being selected)
         NSColor.clear.setFill()
         selRect.fill()
 
-        // Draw border
         NSColor.systemBlue.setStroke()
         let path = NSBezierPath(rect: selRect)
         path.lineWidth = 2.0
         path.stroke()
 
-        // Draw size label
         let label = "\(Int(w)) × \(Int(h))"
         let labelAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .bold),
@@ -194,12 +188,10 @@ private class SelectionView: NSView {
             .backgroundColor: NSColor.black.withAlphaComponent(0.7),
         ]
         let labelSize = label.size(withAttributes: labelAttrs)
-        let labelRect = NSRect(
+        label.draw(in: NSRect(
             x: selRect.midX - labelSize.width / 2,
             y: selRect.maxY + 8,
-            width: labelSize.width + 8,
-            height: labelSize.height + 4
-        )
-        label.draw(in: labelRect, withAttributes: labelAttrs)
+            width: labelSize.width + 8, height: labelSize.height + 4
+        ), withAttributes: labelAttrs)
     }
 }

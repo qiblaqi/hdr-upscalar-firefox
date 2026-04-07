@@ -139,68 +139,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         regionSelector?.show(windowFrame: frame)
     }
 
-    private func applyVideoRegion(_ screenRect: CGRect) {
+    private func applyVideoRegion(_ fractionalRect: CGRect) {
         guard let windowFrame = lastWindowFrame else { return }
 
-        // Convert screen-absolute rect to window-relative rect
-        let relativeX = screenRect.origin.x - windowFrame.origin.x
-        let relativeY = screenRect.origin.y - windowFrame.origin.y
-        let relativeRect = CGRect(
-            x: max(0, relativeX),
-            y: max(0, relativeY),
-            width: min(screenRect.width, windowFrame.width - max(0, relativeX)),
-            height: min(screenRect.height, windowFrame.height - max(0, relativeY))
-        )
-
-        self.videoRegion = relativeRect
+        self.videoRegion = fractionalRect
         self.statusBar?.setHasVideoRegion(true)
 
-        print("[HDR Upscaler] Video region set: \(Int(relativeRect.origin.x)),\(Int(relativeRect.origin.y)) \(Int(relativeRect.width))x\(Int(relativeRect.height)) (relative to window)")
+        // Tell pipeline to crop frames on the GPU
+        pipeline?.setVideoRegion(fractionalRect)
 
-        // Update capture to only stream this region
-        Task { [weak self] in
-            guard let self = self else { return }
-            do {
-                try await self.capture?.updateCaptureRect(relativeRect)
-                // Update overlay to cover only the video region
-                let videoScreenRect = CGRect(
-                    x: windowFrame.origin.x + relativeRect.origin.x,
-                    y: windowFrame.origin.y + relativeRect.origin.y,
-                    width: relativeRect.width,
-                    height: relativeRect.height
-                )
-                self.pipeline?.updateOverlayFrame(videoScreenRect)
-                self.pipeline?.setTabVisible(true)
+        // Position overlay over just the video area
+        let videoScreenRect = CGRect(
+            x: windowFrame.origin.x + fractionalRect.origin.x * windowFrame.width,
+            y: windowFrame.origin.y + fractionalRect.origin.y * windowFrame.height,
+            width: fractionalRect.width * windowFrame.width,
+            height: fractionalRect.height * windowFrame.height
+        )
+        pipeline?.updateOverlayFrame(videoScreenRect)
+        pipeline?.setTabVisible(true)
 
-                // Update available factors for the smaller capture size
-                let scale = NSScreen.main?.backingScaleFactor ?? 2.0
-                let inputW = Int(relativeRect.width * scale)
-                let inputH = Int(relativeRect.height * scale)
-                self.statusBar?.updateAvailableFactors(inputWidth: inputW, inputHeight: inputH)
+        // Update available factors for the smaller capture size
+        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+        let inputW = Int(fractionalRect.width * windowFrame.width * scale)
+        let inputH = Int(fractionalRect.height * windowFrame.height * scale)
+        self.statusBar?.updateAvailableFactors(inputWidth: inputW, inputHeight: inputH)
 
-                print("[HDR Upscaler] Capture cropped to video region (\(inputW)x\(inputH) pixels)")
-            } catch {
-                print("[HDR Upscaler] Failed to update capture rect: \(error)")
-                self.pipeline?.setTabVisible(true)
-            }
-        }
+        print("[HDR Upscaler] Video region set: \(String(format: "%.1f%%", fractionalRect.origin.x * 100)),\(String(format: "%.1f%%", fractionalRect.origin.y * 100)) \(String(format: "%.1f%%", fractionalRect.width * 100))x\(String(format: "%.1f%%", fractionalRect.height * 100)) (\(inputW)x\(inputH) pixels)")
     }
 
     private func resetVideoRegion() {
         videoRegion = nil
         statusBar?.setHasVideoRegion(false)
-        print("[HDR Upscaler] Video region reset to full window")
+        pipeline?.clearVideoRegion()
 
-        // Restart capture for full window
-        guard case .capturing(let windowID) = state else { return }
-        Task { [weak self] in
-            guard let self = self, let capture = self.capture else { return }
-            // Re-find and restart capture to reset sourceRect
-            let windows = try? await capture.findFirefoxWindows()
-            if let target = windows?.first(where: { $0.windowID == windowID }) {
-                try? await capture.startCapture(window: target)
-            }
+        // Restore overlay to full window
+        if let windowFrame = lastWindowFrame {
+            pipeline?.updateOverlayFrame(windowFrame)
+
+            // Restore available factors for full window
+            let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+            let inputW = Int(windowFrame.width * scale)
+            let inputH = Int(windowFrame.height * scale)
+            statusBar?.updateAvailableFactors(inputWidth: inputW, inputHeight: inputH)
         }
+
+        print("[HDR Upscaler] Video region reset to full window")
     }
 
     // MARK: - Startup
@@ -322,13 +305,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let windowFrame = CGRect(x: x, y: y, width: w, height: h)
         lastWindowFrame = windowFrame
 
-        // If video region is set, position overlay over just the video area
+        // If video region is set (fractional), position overlay over just the video area
         if let region = videoRegion {
             let videoScreenRect = CGRect(
-                x: windowFrame.origin.x + region.origin.x,
-                y: windowFrame.origin.y + region.origin.y,
-                width: region.width,
-                height: region.height
+                x: windowFrame.origin.x + region.origin.x * windowFrame.width,
+                y: windowFrame.origin.y + region.origin.y * windowFrame.height,
+                width: region.width * windowFrame.width,
+                height: region.height * windowFrame.height
             )
             pipeline?.updateOverlayFrame(videoScreenRect)
         } else {
