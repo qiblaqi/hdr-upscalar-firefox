@@ -1,5 +1,6 @@
 import Metal
 import MetalFX
+import HDRUpscalerCore
 
 /// MetalFX spatial upscaler wrapper.
 /// Creates and manages MTLFXSpatialScaler instances for real-time video frame upscaling.
@@ -55,7 +56,7 @@ final class Upscaler {
         currentOutputHeight = outputHeight
         currentInputPixelFormat = inputPixelFormat
 
-        print("[Upscaler] Configured: \(inputWidth)x\(inputHeight) -> \(outputWidth)x\(outputHeight) (\(inputPixelFormat.rawValue))")
+        logInfo("[Upscaler] Configured: \(inputWidth)x\(inputHeight) -> \(outputWidth)x\(outputHeight) (\(inputPixelFormat.rawValue))")
     }
 
     /// Encode an upscale pass into the command buffer.
