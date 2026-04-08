@@ -1,4 +1,5 @@
 import AppKit
+import HDRUpscalerCore
 
 /// Menu bar status item with upscale factor selector, HDR intensity, and status info.
 final class StatusBarMenu {
@@ -11,13 +12,9 @@ final class StatusBarMenu {
     private var isCapturing = false
     private var windowTitle: String = "Not connected"
 
-    private var hasVideoRegion = false
-
     // Callbacks
     var onUpscaleFactorChanged: ((Float) -> Void)?
     var onHDRIntensityChanged: ((Float) -> Void)?
-    var onSelectVideoRegion: (() -> Void)?
-    var onResetVideoRegion: (() -> Void)?
     var onQuit: (() -> Void)?
 
     private let allFactors: [Float] = [1.5, 2.0, 3.0, 4.0]
@@ -74,7 +71,7 @@ final class StatusBarMenu {
 
         if !availableFactors.contains(currentFactor) {
             let newFactor = availableFactors.last ?? 2.0
-            print("[StatusBar] Factor \(currentFactor)x exceeds GPU limit, downgrading to \(newFactor)x")
+            logInfo("[StatusBar] Factor \(currentFactor)x exceeds GPU limit, downgrading to \(newFactor)x")
             currentFactor = newFactor
             onUpscaleFactorChanged?(newFactor)
         }
@@ -90,7 +87,7 @@ final class StatusBarMenu {
         let displayTitle = windowTitle.count > 40
             ? String(windowTitle.prefix(37)) + "..."
             : windowTitle
-        let statusText = isCapturing ? "Capturing: \(displayTitle)" : "Not capturing"
+        let statusText = isCapturing ? "Capturing: \(displayTitle)" : displayTitle
         let statusItem = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
         statusItem.isEnabled = false
         menu.addItem(statusItem)
@@ -121,24 +118,10 @@ final class StatusBarMenu {
         for (index, preset) in intensityPresets.enumerated() {
             let item = NSMenuItem(title: "  \(preset.0)", action: #selector(intensitySelected(_:)), keyEquivalent: "")
             item.target = self
-            item.tag = 100 + index  // offset to avoid collision with factor tags
+            item.tag = 100 + index
             item.state = (preset.1 == currentIntensity) ? .on : .off
             menu.addItem(item)
         }
-
-        menu.addItem(NSMenuItem.separator())
-
-        // Video region section
-        if hasVideoRegion {
-            let regionItem = NSMenuItem(title: "Reset to Full Window", action: #selector(resetRegion), keyEquivalent: "")
-            regionItem.target = self
-            menu.addItem(regionItem)
-        }
-
-        let selectItem = NSMenuItem(title: "Select Video Region...", action: #selector(selectRegion), keyEquivalent: "r")
-        selectItem.target = self
-        selectItem.isEnabled = isCapturing
-        menu.addItem(selectItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -165,19 +148,6 @@ final class StatusBarMenu {
         currentIntensity = intensity
         onHDRIntensityChanged?(intensity)
         rebuildMenu()
-    }
-
-    func setHasVideoRegion(_ has: Bool) {
-        self.hasVideoRegion = has
-        rebuildMenu()
-    }
-
-    @objc private func selectRegion() {
-        onSelectVideoRegion?()
-    }
-
-    @objc private func resetRegion() {
-        onResetVideoRegion?()
     }
 
     @objc private func quitApp() {

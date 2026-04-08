@@ -3,6 +3,7 @@ import CoreMedia
 import CoreVideo
 import Metal
 import AppKit
+import HDRUpscalerCore
 
 /// Sendable snapshot of an SCWindow — safe to pass across concurrency boundaries.
 struct WindowSnapshot: Sendable {
@@ -47,14 +48,14 @@ final class ScreenCapture: NSObject, SCStreamDelegate, SCStreamOutput {
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             if content.windows.isEmpty && content.displays.isEmpty {
-                print("[ScreenCapture] Screen Recording permission not granted.")
-                print("[ScreenCapture] Go to: System Settings → Privacy & Security → Screen Recording")
-                print("[ScreenCapture] Add Terminal (or your IDE) and restart the app.")
+                logInfo("[ScreenCapture] Screen Recording permission not granted.")
+                logInfo("[ScreenCapture] Go to: System Settings → Privacy & Security → Screen Recording")
+                logInfo("[ScreenCapture] Add Terminal (or your IDE) and restart the app.")
                 return false
             }
             return true
         } catch {
-            print("[ScreenCapture] Permission check failed: \(error)")
+            logInfo("[ScreenCapture] Permission check failed: \(error)")
             return false
         }
     }
@@ -105,7 +106,7 @@ final class ScreenCapture: NSObject, SCStreamDelegate, SCStreamOutput {
 
         // Revalidate: the window may have disappeared since findFirefoxWindows()
         guard let freshWindow = try await refreshWindow(windowID: window.windowID) else {
-            print("[ScreenCapture] Window disappeared before capture start: \(window.windowID)")
+            logInfo("[ScreenCapture] Window disappeared before capture start: \(window.windowID)")
             return
         }
 
@@ -140,7 +141,7 @@ final class ScreenCapture: NSObject, SCStreamDelegate, SCStreamOutput {
                 break
             } catch {
                 lastError = error
-                print("[ScreenCapture] Attempt \(attempt)/3 failed: \(error.localizedDescription)")
+                logInfo("[ScreenCapture] Attempt \(attempt)/3 failed: \(error.localizedDescription)")
                 if attempt < 3 {
                     try await Task.sleep(nanoseconds: 300_000_000) // 300ms between retries
                 }
@@ -155,7 +156,7 @@ final class ScreenCapture: NSObject, SCStreamDelegate, SCStreamOutput {
 
         self.isCapturing = true
 
-        print("[ScreenCapture] Capturing: \(freshWindow.owningApplication?.applicationName ?? "?") — \"\(freshWindow.title ?? "untitled")\" (\(config.width)x\(config.height))")
+        logInfo("[ScreenCapture] Capturing: \(freshWindow.owningApplication?.applicationName ?? "?") — \"\(freshWindow.title ?? "untitled")\" (\(config.width)x\(config.height))")
 
         // Build a Sendable snapshot — safe to pass across concurrency boundaries
         let snapshot = WindowSnapshot(
@@ -185,13 +186,13 @@ final class ScreenCapture: NSObject, SCStreamDelegate, SCStreamOutput {
         do {
             try await stream.stopCapture()
         } catch {
-            print("[ScreenCapture] stopCapture error: \(error)")
+            logInfo("[ScreenCapture] stopCapture error: \(error)")
         }
 
         self.stream = nil
         self.isCapturing = false
         self.capturedWindow = nil
-        print("[ScreenCapture] Stopped")
+        logInfo("[ScreenCapture] Stopped")
     }
 
     // MARK: - SCStreamOutput
@@ -215,7 +216,7 @@ final class ScreenCapture: NSObject, SCStreamDelegate, SCStreamOutput {
     // MARK: - SCStreamDelegate
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        print("[ScreenCapture] Stream stopped with error: \(error)")
+        logInfo("[ScreenCapture] Stream stopped with error: \(error)")
         // Clean up ALL state so nothing is stale
         self.stream = nil
         self.capturedWindow = nil

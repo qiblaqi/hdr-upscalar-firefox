@@ -1,0 +1,7 @@
+{
+  "name": "com.hdrupscaler.app",
+  "description": "HDR Upscaler — native macOS video processing pipeline",
+  "path": "/Users/qizhao/Developer/hdr-upscalar-firefox/native-app/.build/debug/HDRUpscaler",
+  "type": "stdio",
+  "allowed_extensions": ["hdrupscaler@example.com"]
+}

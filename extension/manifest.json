@@ -1,0 +1,27 @@
+{
+  "manifest_version": 2,
+  "name": "HDR Upscaler",
+  "version": "1.0.0",
+  "description": "Detects video elements and sends their position to the HDR Upscaler native app for processing.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "hdrupscaler@example.com"
+    }
+  },
+  "permissions": [
+    "nativeMessaging",
+    "activeTab",
+    "tabs"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  }
+}

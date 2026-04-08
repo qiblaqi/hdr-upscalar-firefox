@@ -2,14 +2,15 @@ import Metal
 import MetalKit
 import MetalPerformanceShaders
 import AppKit
+import HDRUpscalerCore
 
 /// Orchestrates the video processing pipeline:
-/// ScreenCaptureKit frame → MetalFX upscale → SDR-to-EDR shader → downscale → overlay
+/// ScreenCaptureKit frame → crop ROI → MetalFX upscale → SDR-to-EDR shader → downscale → preview window
 final class HDRPipeline {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let upscaler: Upscaler
-    private let overlay: OverlayWindow
+    let previewWindow: PreviewWindow
     private let hdrComputePipeline: MTLComputePipelineState
 
     private var upscaledTexture: MTLTexture?
@@ -61,7 +62,7 @@ final class HDRPipeline {
         self.hdrComputePipeline = try device.makeComputePipelineState(function: function)
 
         self.upscaler = Upscaler(device: device)
-        self.overlay = OverlayWindow(device: device)
+        self.previewWindow = PreviewWindow(device: device)
 
         self.paramsBuffer = device.makeBuffer(length: MemoryLayout<HDRParams>.stride, options: .storageModeShared)
         updateParamsBuffer()
@@ -69,26 +70,18 @@ final class HDRPipeline {
 
     // MARK: - Control
 
-    func start(windowFrame: NSRect) {
+    func start(videoSize: CGSize = CGSize(width: 1280, height: 720)) {
         isActive = true
         frameCount = 0
         frameInFlight = false
-        overlay.show(frame: windowFrame)
-        print("[HDRPipeline] Started — overlay at \(windowFrame)")
+        previewWindow.show(videoSize: videoSize)
+        logInfo("[HDRPipeline] Started — preview window \(Int(videoSize.width))x\(Int(videoSize.height))")
     }
 
     func stop() {
         isActive = false
-        overlay.hide()
-        print("[HDRPipeline] Stopped")
-    }
-
-    func updateOverlayFrame(_ frame: NSRect) {
-        overlay.updateFrame(frame)
-    }
-
-    func setTabVisible(_ visible: Bool) {
-        overlay.setVisible(visible)
+        previewWindow.hide()
+        logInfo("[HDRPipeline] Stopped")
     }
 
     func setUpscaleFactor(_ factor: Float) {
@@ -98,27 +91,27 @@ final class HDRPipeline {
         hdrOutputTexture = nil
         presentTexture = nil
         croppedTexture = nil
-        print("[HDRPipeline] Upscale factor → \(factor)x")
+        logInfo("[HDRPipeline] Upscale factor → \(factor)x")
     }
 
     func setHDRIntensity(_ intensity: Float) {
         hdrIntensity = max(0.0, min(1.0, intensity))
         updateParamsBuffer()
-        print("[HDRPipeline] HDR intensity → \(String(format: "%.0f%%", hdrIntensity * 100))")
+        logInfo("[HDRPipeline] HDR intensity → \(String(format: "%.0f%%", hdrIntensity * 100))")
     }
 
     /// Set the video region as a fractional rect (0.0–1.0) relative to the window.
     func setVideoRegion(_ rect: CGRect) {
         videoRegion = rect
         croppedTexture = nil
-        print("[HDRPipeline] Video region set: \(String(format: "%.1f%%", rect.origin.x * 100)),\(String(format: "%.1f%%", rect.origin.y * 100)) \(String(format: "%.1f%%", rect.width * 100))x\(String(format: "%.1f%%", rect.height * 100))")
+        logInfo("[HDRPipeline] Video region set: \(String(format: "%.1f%%", rect.origin.x * 100)),\(String(format: "%.1f%%", rect.origin.y * 100)) \(String(format: "%.1f%%", rect.width * 100))x\(String(format: "%.1f%%", rect.height * 100))")
     }
 
     /// Clear the video region — process full window.
     func clearVideoRegion() {
         videoRegion = nil
         croppedTexture = nil
-        print("[HDRPipeline] Video region cleared — full window")
+        logInfo("[HDRPipeline] Video region cleared — full window")
     }
 
     // MARK: - Frame Processing (called from processing queue)
@@ -195,7 +188,7 @@ final class HDRPipeline {
                     inputPixelFormat: sourceTexture.pixelFormat
                 )
             } catch {
-                print("[HDRPipeline] Upscaler error: \(error)")
+                logInfo("[HDRPipeline] Upscaler error: \(error)")
                 return
             }
 
@@ -210,7 +203,7 @@ final class HDRPipeline {
             do {
                 try upscaler.encode(input: sourceTexture, output: upscaledTex, commandBuffer: commandBuffer)
             } catch {
-                print("[HDRPipeline] Upscaler encode error: \(error)")
+                logInfo("[HDRPipeline] Upscaler encode error: \(error)")
                 return
             }
             textureAfterUpscale = upscaledTex
@@ -254,8 +247,8 @@ final class HDRPipeline {
             textureToPresent = hdrTex
         }
 
-        // Step 4: Blit to overlay drawable (always native res now)
-        overlay.present(texture: textureToPresent, commandBuffer: commandBuffer)
+        // Step 4: Blit to preview window drawable (always native res now)
+        previewWindow.present(texture: textureToPresent, commandBuffer: commandBuffer)
 
         // Backpressure tracking
         frameInFlight = true
@@ -269,7 +262,7 @@ final class HDRPipeline {
         if frameCount % 120 == 0 {
             let maxEDR = Float(NSScreen.main?.maximumExtendedDynamicRangeColorComponentValue ?? 2.0)
             let cropInfo = videoRegion != nil ? " (cropped \(srcW)x\(srcH))" : ""
-            print("[HDRPipeline] \(frameCount) frames | \(width)x\(height)\(cropInfo) → \(processW)x\(processH) (\(upscaleFactor)x) | EDR: \(String(format: "%.1f", maxEDR))x | intensity: \(String(format: "%.0f%%", hdrIntensity * 100))")
+            logInfo("[HDRPipeline] \(frameCount) frames | \(width)x\(height)\(cropInfo) → \(processW)x\(processH) (\(upscaleFactor)x) | EDR: \(String(format: "%.1f", maxEDR))x | intensity: \(String(format: "%.0f%%", hdrIntensity * 100))")
         }
     }
 
